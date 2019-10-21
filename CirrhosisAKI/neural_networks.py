@@ -281,7 +281,7 @@ class Encoder:
             self.train, self.train,
             epochs=self.epochs,
             batch_size=15,
-            validation_split=0.2,
+            validation_split=0.15,
             shuffle=True)
 
         # Declare the LSTM input layer as the output as well

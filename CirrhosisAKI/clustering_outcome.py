@@ -1,6 +1,7 @@
 #!/bin/python
 
 import sqlite3
+import datetime
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -11,7 +12,7 @@ from scipy.stats import chi2_contingency, fisher_exact
 from sklearn.mixture import GaussianMixture
 from sklearn.cluster import KMeans, SpectralClustering, AffinityPropagation, AgglomerativeClustering, OPTICS, DBSCAN
 from sklearn.decomposition import FactorAnalysis, PCA
-from sklearn.manifold import TSNE
+from sklearn.manifold import TSNE, LocallyLinearEmbedding
 
 
 class Cluster:
@@ -25,19 +26,20 @@ class Cluster:
 
         self.decomposition_algorithms = {
             'Encoder': None,
-            'PCA': PCA,
-            'FactorAnalysis': FactorAnalysis}
-            # 'TSNE': TSNE}
+            'PCA': PCA(n_components=2),
+            'LLE': LocallyLinearEmbedding(n_components=2, n_neighbors=10, n_jobs=-1),
+            'FactorAnalysis': FactorAnalysis(n_components=2),
+            'TSNE': TSNE}
 
         # It's better to init there here because of differing params
         self.clustering_algorithms = {
             'Spectral': SpectralClustering(self.clusters, n_jobs=-1),
             'KMeans': KMeans(self.clusters, n_jobs=-1),
-            'GaussianMixture': GaussianMixture(self.clusters),
+            'GaussianMixture': GaussianMixture(self.clusters, n_init=10),
             # 'AffinityPropagation': AffinityPropagation(),
-            'Agglomerative': AgglomerativeClustering(self.clusters)}
+            'Agglomerative': AgglomerativeClustering(self.clusters),
             # 'OPTICS': OPTICS(),
-            # 'DBSCAN': DBSCAN()}
+            'DBSCAN': DBSCAN()}
 
     def cluster(self, plot_clusters=False):
         print('Finding clusters')
@@ -48,19 +50,22 @@ class Cluster:
 
             elif decomp == 'TSNE':
                 df_decomp = pd.DataFrame(
-                    TSNE(perplexity=40).fit_transform(self.df),
+                    TSNE(perplexity=20).fit_transform(self.df),
                     index=self.df.index)
 
             else:
                 df_decomp = pd.DataFrame(
-                    self.decomposition_algorithms[decomp](2).fit_transform(self.df),
+                    self.decomposition_algorithms[decomp].fit_transform(self.df),
                     index=self.df.index)
 
             # Plot decomposed dataframes
             if plot_clusters:
-                plt.figure()
-                fig = sns.scatterplot(x=df_decomp[0], y=df_decomp[1], data=df_decomp)
-                fig.figure.savefig(decomp + '.png', dpi=600)
+                try:
+                    plt.figure()
+                    fig = sns.scatterplot(x=df_decomp[0], y=df_decomp[1], data=df_decomp)
+                    fig.figure.savefig(decomp + '.png', dpi=600)
+                except:
+                    print('Plotting error')
 
             for cluster_alg in self.clustering_algorithms:
                 print(decomp, cluster_alg)
@@ -91,7 +96,7 @@ class Cluster:
                     print('Error', decomp, cluster_alg)
 
 
-    def outcome_generator(self, df_mortality):
+    def outcome_generator(self):
         if self.df_clusters.empty:
             return
         print('Generating outcomes')
@@ -112,12 +117,10 @@ class Cluster:
         self.df_final = self.df_final.reset_index()
 
         # Attach outcomes to this dataframe
-        # Mortality - Must be generated at the time of calculating which patients
-        # must be included in analysis
-        # It is then stored as the 'DEATH' feature
-        self.df_final = self.df_final.merge(df_mortality, on='SUBJECT_ID', how='left')
-        self.df_final = self.df_final.drop('HADM_ID_y', axis=1)
-        self.df_final = self.df_final.rename({'HADM_ID_x': 'HADM_ID'}, axis=1)
+        # Mortality - Read from the hospital admissions csv file
+        df_exp = pd.read_csv('data_HospitalAdmissions.csv')
+        df_exp = df_exp[['SUBJECT_ID', 'DEATH']]
+        self.df_final = self.df_final.merge(df_exp, on='SUBJECT_ID', how='left')
 
         # Dialysis
         # Dialysis is 5498 - Peritoneal, 3995 - Hemodialysis (PROCEDURES_ICD)
@@ -136,7 +139,7 @@ class Cluster:
 
         # Create new dataframe
         df_clusters_only = self.df_final.drop([
-            'HADM_ID', 'SUBJECT_ID', 'DOD', 'DI', 'ICD9_CODE', 'ADMITTIME'], axis=1)
+            'HADM_ID', 'SUBJECT_ID', 'ICD9_CODE'], axis=1)
         df_clusters_only['DEATH'] = df_clusters_only.apply(
             lambda x: 1 if x['DEATH'] is True else 0, axis=1)
         df_clusters_only['DIALYSIS'] = df_clusters_only.apply(

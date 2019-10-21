@@ -144,34 +144,19 @@ def process_labevents(outfile):
 
 
 def main():
-    # We'll be looking at unique subject IDs
-    # In case of several admissions for one patient,
-    # only the first admission will be counted
-    # This list is generated from the KDIGO application module
-    hadm_ids = pd.read_csv('HospitalAdmissions.csv', header=None) # Includes repeats
-    hadm_ids_string = ','.join(
-        [str(i) for i in hadm_ids[0].to_list()])
-
-    # This will be further reduced to only the first hospital admission per patient
-    all_ids = Data.database.execute(
-        f'SELECT SUBJECT_ID, HADM_ID FROM ADMISSIONS WHERE HADM_ID IN ({hadm_ids_string})').fetchall()
-    all_ids.sort()
-
-    df_admissions = pd.DataFrame(all_ids, columns=['SUBJECT_ID', 'HADM_ID'])
-    df_admissions = df_admissions.sort_values(['SUBJECT_ID', 'HADM_ID'])
-    df_admissions_g = df_admissions.groupby('SUBJECT_ID')
+    df_admissions = pd.read_csv('data_HospitalAdmissions.csv')
 
     # Store in Data class
-    Data.df_ids = df_admissions_g.first().reset_index()
+    Data.df_ids = df_admissions[['SUBJECT_ID', 'HADM_ID']]
 
     # Get demographic info
-    process_demographics('data_demographics_out.csv')
+    process_demographics('data_Demographics.csv')
 
     # Process CHARTEVENTS table
-    process_chartevents('data_chartevents_out.csv')
+    process_chartevents('data_ChartEvents.csv')
 
     # Process LABEVENTS table
-    process_labevents('data_labevents_out.csv')
+    process_labevents('data_LabEvents.csv')
 
     # The rest of this is intended workflow:
 
