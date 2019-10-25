@@ -1,15 +1,21 @@
 #!/bin/python
 
+import datetime
 import fancyimpute
 import pandas as pd
 
 from sklearn.neighbors import KDTree
 
 
-def feature_extraction(df, data_threshold):
+def feature_extraction(df, data_threshold, df_restrict_to_time=None):
     # The df here is the dataframe for the whole table
-    # It's supposed to have an HADM_ID, an ITEMID, and a VALUE
+    # It's supposed to have an HADM_ID, an ITEMID, a CHARTTIME, and a VALUE
     # This function will return a list of ITEMIDs to use
+
+    # Time restriction drops all values that come after the restricted
+    # time. If there is a dataframe provided there, values will be taken
+    # from the 'RESTRICTION_TIME' feature.
+    # The dataframe should have at least a HADM_ID along with that.
 
     # Process dataframe first
     # It requires HADM_ID, ITEMID, CHARTTIME, VALUE
@@ -18,14 +24,50 @@ def feature_extraction(df, data_threshold):
     df['CHARTTIME'] = pd.to_datetime(df.CHARTTIME)
     df['VALUE'] = pd.to_numeric(df.VALUE, errors='coerce') # TODO - Include categorical data
     df = df.dropna()
-    df = df.sort_values(['HADM_ID', 'ITEMID', 'CHARTTIME']).drop('CHARTTIME', axis=1)
+    df = df.sort_values(['HADM_ID', 'ITEMID', 'CHARTTIME'])
     df_g = df.groupby('HADM_ID')
+
+    # Time restriction takes priority over data thresholds
+    df_time_filtered = df
+    if df_restrict_to_time is not None:
+        print('Restricting to specific time')
+        df_time_filtered = pd.DataFrame()
+        df_restrict_to_time['RESTRICTION_TIME'] = pd.to_datetime(
+            df_restrict_to_time['RESTRICTION_TIME'])
+
+        for this_group in df_g:
+            hadm_id = this_group[0]
+            this_df = this_group[1]
+            this_df = this_df.sort_values(['CHARTTIME'])
+
+            # Get restriction time for this HADM_ID
+            # Im not sure why the double to_datetime is needed
+            restriction_time = pd.to_datetime(df_restrict_to_time[
+                df_restrict_to_time.HADM_ID == hadm_id].RESTRICTION_TIME.values[0])
+
+            # Increase restriction time by 2 days
+            restriction_time += datetime.timedelta(days=2)
+
+            # Restrict to times before diagnosis of AKI
+            this_df = this_df[this_df.CHARTTIME <= restriction_time]
+
+            # And append to temporary storage
+            df_time_filtered = df_time_filtered.append(
+                this_df, ignore_index=True)
+
+    # Re-sort new dataframe
+    # Proceed as before
+    df_time_filtered = df_time_filtered.sort_values(
+        ['HADM_ID', 'ITEMID', 'CHARTTIME']).drop('CHARTTIME', axis=1)
+    df_g = df_time_filtered.groupby('HADM_ID')
 
     # Store counts here
     df_all_counts = pd.DataFrame()
 
     for this_group in df_g:
+        # Restricton takes precedence over all other kinds of feature selection
         this_df = this_group[1]
+
         this_df = this_df.drop('HADM_ID', axis=1)
         df_counts = this_df.sort_values('ITEMID').groupby('ITEMID').count()
 
@@ -34,8 +76,8 @@ def feature_extraction(df, data_threshold):
         df_all_counts = df_all_counts.join(df_counts, how='outer', rsuffix=suffix)
 
     # Take the transpose of this table to calculate features which have data for
-    # more than 60% of cases
-    # Also filter out cases who have less than 60% data
+    # more than data_threshold
+    # Also filter out cases who have less than data_threshold
     feature_count = df_all_counts.T.count() / len(df_all_counts.T)
     features = feature_count[feature_count >= data_threshold].index.to_list()
     df_cleaned_features = df_all_counts.T[features].T
@@ -45,7 +87,7 @@ def feature_extraction(df, data_threshold):
     cases = [int(i.replace('VALUE_', '')) for i in cases[1:]]  # TODO - Account for first patient
 
     # Create filtered dataframe
-    df_filtered = df.query('ITEMID in @features and HADM_ID in @cases')
+    df_filtered = df_time_filtered.query('ITEMID in @features and HADM_ID in @cases')
     return df_filtered
 
 

@@ -1,8 +1,5 @@
 #!/bin/python
 
-import os
-import gc
-
 import pandas as pd
 import numpy as np
 
@@ -22,18 +19,37 @@ class LSTMEncoderImputer:
     # Missing values are taken from the average of the LSTM
     # prediction vector for the 5 nearest neighbors
 
-    def __init__(self, df, dict_nn_for_missing, value_limit=20, epochs=150, save_to_disk=False):
+    def __init__(self, df, dict_nn_for_missing, epochs=150, value_limit=-1):
         self.df = df
         self.dict_nn_for_missing = dict_nn_for_missing
 
         # These many observations will be considered for training
         # Any observations beyond this will be truncated
         # Observations less than this will be 0 padded
+
+        # Calculate an automatic value limit on the basis of the best number of
+        # records per ITEMID per patient
         self.value_limit = value_limit
+        if value_limit == -1:
+            per_itemid_count = []
+            unique_item_ids = self.df.ITEMID.unique()
+
+            for this_id in unique_item_ids:
+                obs_count = self.df.query(
+                    'ITEMID == @this_id').drop('ITEMID', axis=1).groupby('HADM_ID').count()
+
+                per_itemid_count.append((
+                    this_id,
+                    obs_count.max().VALUE // 2))
+
+            df_value_count = pd.DataFrame(
+                per_itemid_count, columns=['ITEMID', 'COUNT']).set_index('ITEMID')
+
+            self.value_limit = df_value_count.COUNT.max() // 2
+        print('Value limit:', self.value_limit)
 
         # Miscellaneous options
         self.epochs = epochs
-        self.save_to_disk = save_to_disk
 
         # Run through each feature
         # > Scale data
@@ -168,19 +184,11 @@ class LSTMEncoderImputer:
             df_predict_feature = pd.DataFrame(
                 prediction_dict.items(), columns=columns).set_index('HADM_ID')
 
-            # Save each dataframe to disk to save memory
-            # Or process as usual
-            if self.save_to_disk:
-                os.makedirs('LSTMOut', exist_ok=True)
-                filename = 'LSTMOut' + os.path.sep + 'LSTM_' + str(this_itemid)
-                df_predict_feature.to_pickle(filename)
-                gc.collect()
+            if self.df_predict.empty:
+                self.df_predict = df_predict_feature
             else:
-                if self.df_predict.empty:
-                    self.df_predict = df_predict_feature
-                else:
-                    self.df_predict = self.df_predict.join(
-                        df_predict_feature, how='inner')
+                self.df_predict = self.df_predict.join(
+                    df_predict_feature, how='inner')
 
 
 # Dataframes need to have their indices set to the HADM_ID
@@ -267,8 +275,8 @@ class Encoder:
             activation='tanh'))
         model.add(Dense(self.output_dimensions * 4, activation='tanh'))
         model.add(Dense(self.output_dimensions * 2, activation='tanh'))
-        model.add(Dense(self.output_dimensions, activation='tanh', activity_regularizer=l1(10e-5)))
-        # model.add(Dense(self.output_dimensions, activation='tanh'))
+        # model.add(Dense(self.output_dimensions, activation='tanh', activity_regularizer=l1(10e-5)))
+        model.add(Dense(self.output_dimensions, activation='tanh'))
         model.add(Dense(self.output_dimensions * 2, activation='tanh'))
         model.add(Dense(self.output_dimensions * 4, activation='tanh'))
         model.add(Dense(self.output_dimensions * 8, activation='tanh'))

@@ -144,7 +144,7 @@ def process_labevents(outfile):
 
 
 def main():
-    df_admissions = pd.read_csv('data_HospitalAdmissions.csv')
+    df_admissions = pd.read_pickle('data_HospitalAdmissions.pickle')
 
     # Store in Data class
     Data.df_ids = df_admissions[['SUBJECT_ID', 'HADM_ID']]

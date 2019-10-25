@@ -184,14 +184,34 @@ df_hadms = df_hadms.merge(df_death, on='SUBJECT_ID', how='outer')
 df_hadms['DEATH_INTERVAL'] = df_hadms.apply(
     lambda x: x['DOD'] - x['CHARTTIME'], axis=1)
 
+# Drop all deaths less than 2 days after diagnosis
+t_delta_min = datetime.timedelta(days=2)
+df_hadms['DEATH_AFTER_2DAYS'] = df_hadms.apply(
+    lambda x: x['DEATH_INTERVAL'] > t_delta_min or pd.isnull(x['DEATH_INTERVAL']), axis=1)
+df_hadms = df_hadms[df_hadms.DEATH_AFTER_2DAYS == True]
+
 # Comparison time delta = 28 days
 t_delta = datetime.timedelta(days=28)
-df_hadms['DEATH'] = df_hadms.apply(
+df_hadms['OUTCOME_DEATH'] = df_hadms.apply(
     lambda x: x['DEATH_INTERVAL'] <= t_delta, axis=1)
-df_hadms = df_hadms[['SUBJECT_ID', 'HADM_ID', 'CHARTTIME', 'DEATH_INTERVAL', 'DEATH']]
+
+# Add dialysis to each hospital admission
+# This will be evaluated as a separate outcome
+df_dialysis = pd.read_sql_query(
+    f'SELECT HADM_ID, ICD9_CODE FROM PROCEDURES_ICD WHERE ICD9_CODE IN (5498, 3995)',
+    database)
+df_dialysis = df_dialysis.query('HADM_ID in @all_hadms')
+df_dialysis = df_dialysis.drop_duplicates()
+
+df_hadms = df_hadms.merge(df_dialysis, on='HADM_ID', how='left')
+df_hadms['OUTCOME_DIALYSIS'] = df_hadms.apply(
+    lambda x: False if pd.isnull(x['ICD9_CODE']) else True, axis=1)
 
 # This line decides which records to get. First or last admission.
+df_hadms = df_hadms[
+    ['SUBJECT_ID', 'HADM_ID', 'CHARTTIME', 'DEATH_INTERVAL', 'OUTCOME_DEATH', 'OUTCOME_DIALYSIS']]
+df_hadms = df_hadms.rename({'CHARTTIME': 'RESTRICTION_TIME'}, axis=1)
 df_hadms = df_hadms.sort_values(
-    ['SUBJECT_ID', 'CHARTTIME']).groupby('SUBJECT_ID').last().reset_index()
+    ['SUBJECT_ID', 'RESTRICTION_TIME']).groupby('SUBJECT_ID').last().reset_index()
 
-df_hadms.to_csv('data_HospitalAdmissions.csv', index=False)
+df_hadms.to_pickle('data_HospitalAdmissions.pickle')
