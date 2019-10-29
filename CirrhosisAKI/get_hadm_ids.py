@@ -36,6 +36,11 @@ df_lab = df_lab.sort_values(['HADM_ID', 'CHARTTIME'])
 
 def check_non_cumulative(df, check_interval_hours, check_type):
     df = df.dropna()
+    # Set a default severity value for S. Cr > 4
+    default_stage = -1
+    if df.VALUE.max() > 4:
+        default_stage = 3
+
     total_records = len(df)
     for i in range(total_records):
         this_record = df.iloc[i]
@@ -48,15 +53,23 @@ def check_non_cumulative(df, check_interval_hours, check_type):
                 if check_type == 'difference':
                     value_delta = next_record.VALUE - this_record.VALUE
                     if value_delta >= 0.3:
-                        return True, next_record.CHARTTIME
+                        return True, next_record.CHARTTIME, max(default_stage, 1)
 
                 if check_type == 'quotient':
                     value_delta = next_record.VALUE / this_record.VALUE
                     if value_delta >= 1.5:
-                        return True, next_record.CHARTTIME
+
+                        # Go from more severe to less severe
+                        stage = 1
+                        if value_delta >= 3:
+                            stage = 3
+                        elif 2 <= value_delta <= 2.9:
+                            stage = 2
+
+                        return True, next_record.CHARTTIME, max(default_stage, stage)
                 break
 
-    return False, None
+    return False, None, -1
 
 
 df_creatinine = df_lab.query('ITEMID == 50912')
@@ -68,14 +81,15 @@ for this_group in df_c_group:
 
     condition1 = check_non_cumulative(this_df, 48, 'difference')
     condition2 = check_non_cumulative(this_df, 24 * 7, 'quotient')
+    max_stage = max(condition1[2], condition2[2])
 
     # Whichever condition was fulfilled first takes precedence in final processing
     # Just append both for now
     if condition1[0]:
-        HADM_IDS.append((this_group[0], condition1[1]))
+        HADM_IDS.append((this_group[0], condition1[1], max_stage))
 
     if condition2[0]:
-        HADM_IDS.append((this_group[0], condition2[1]))
+        HADM_IDS.append((this_group[0], condition2[1], max_stage))
 
 # Process Urine output next =============================================================
 # The weight will have to be added as well - this will come from CHARTEVENTS
@@ -134,16 +148,28 @@ def check_cumulative(df):
             next_record = df.iloc[j]
             time_delta = next_record.CHARTTIME - this_record.CHARTTIME
             time_delta_hours = time_delta.total_seconds() / 3600
-            if time_delta_hours >= 6:
-                urine_production = next_record.cmsm - this_record.cmsm
-                urine_production_ml_per_kg_per_hour = (
-                    (urine_production / this_record.WEIGHT) / time_delta_hours)
 
-                if 0 < urine_production_ml_per_kg_per_hour < 0.5:
-                    return True, next_record.CHARTTIME
+            urine_production = next_record.cmsm - this_record.cmsm
+            uo_ml_per_kg_per_hour = (
+                (urine_production / this_record.WEIGHT) / time_delta_hours)
+
+            if time_delta_hours >= 6:
+                if 0 < uo_ml_per_kg_per_hour < 0.5:
+                    condition_3a = time_delta_hours >= 12 and uo_ml_per_kg_per_hour == 0
+                    condition_3b = time_delta_hours <= 24 and uo_ml_per_kg_per_hour <= 0.3
+                    condition_2 = time_delta_hours <= 12 and uo_ml_per_kg_per_hour <= 0.5
+
+                    # Go from most to least severe
+                    stage = 1
+                    if condition_3a or condition_3b:
+                        stage = 3
+                    elif condition_2:
+                        stage = 2
+
+                    return True, next_record.CHARTTIME, stage
                 break
 
-    return False, None
+    return False, None, None
 
 
 print('Processing UO')
@@ -155,11 +181,12 @@ for count, this_group in enumerate(df_uo_g):
 
     condition3 = check_cumulative(this_df)
     if condition3[0]:
-        HADM_IDS.append((this_group[0], condition3[1]))
+        HADM_IDS.append(
+            (this_group[0], condition3[1], condition3[2]))
 
 # Final processing ======================================================================
 # Filter all hospital admissions to the first time any of the criteria was met
-df_hadms = pd.DataFrame(HADM_IDS, columns=['HADM_ID', 'CHARTTIME'])
+df_hadms = pd.DataFrame(HADM_IDS, columns=['HADM_ID', 'CHARTTIME', 'OUTCOME_STAGE'])
 df_hadms = df_hadms.sort_values(['HADM_ID', 'CHARTTIME'])
 df_hadms = df_hadms.groupby('HADM_ID').first().reset_index()
 
@@ -209,9 +236,32 @@ df_hadms['OUTCOME_DIALYSIS'] = df_hadms.apply(
 
 # This line decides which records to get. First or last admission.
 df_hadms = df_hadms[
-    ['SUBJECT_ID', 'HADM_ID', 'CHARTTIME', 'DEATH_INTERVAL', 'OUTCOME_DEATH', 'OUTCOME_DIALYSIS']]
+    ['SUBJECT_ID', 'HADM_ID', 'CHARTTIME', 'DEATH_INTERVAL', 'OUTCOME_DEATH', 'OUTCOME_DIALYSIS', 'OUTCOME_STAGE']]
 df_hadms = df_hadms.rename({'CHARTTIME': 'RESTRICTION_TIME'}, axis=1)
 df_hadms = df_hadms.sort_values(
     ['SUBJECT_ID', 'RESTRICTION_TIME']).groupby('SUBJECT_ID').last().reset_index()
+
+# Secondary outcomes
+# Persistence of AKI - 7 days following diagnosis
+# Reuse df_creatinine from above
+cr_t_delta = datetime.timedelta(days=7)
+df_cr = df_creatinine.merge(df_hadms[['HADM_ID', 'RESTRICTION_TIME']], how='left', on='HADM_ID')
+df_cr_g = df_cr.groupby('HADM_ID')
+dict_hadm_persist_aki = {}
+for this_group in df_cr_g:
+    this_hadm = this_group[0]
+    this_df = this_group[1]
+
+    this_df['PERSIST'] = this_df.apply(
+        lambda x: x['RESTRICTION_TIME'] < x['CHARTTIME'] < (x['RESTRICTION_TIME'] + cr_t_delta), axis=1)
+    this_df = this_df.query('PERSIST == True')
+
+    minimal_creatinine = this_df.VALUE.min()
+    if minimal_creatinine <= 1.4:  # Defining baseline S.Cr as 1.4
+        dict_hadm_persist_aki[this_hadm] = True  # AKI persisted
+    else:
+        dict_hadm_persist_aki[this_hadm] = False  # AKI resolved
+
+df_hadms['OUTCOME_AKI_PERSISTENT'] = df_hadms['HADM_ID'].map(dict_hadm_persist_aki)
 
 df_hadms.to_pickle('data_HospitalAdmissions.pickle')
